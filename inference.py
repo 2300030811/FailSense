@@ -90,17 +90,21 @@ You must respond with a JSON object containing exactly these fields:
   "root_cause_service": "name of the service that is the PRIMARY root cause",
   "root_cause_category": "config_error|memory_leak|resource_exhaustion|network_failure|dependency_failure|code_bug|deployment_regression|data_corruption",
   "root_cause_description": "detailed explanation of what went wrong and why — include specific evidence from logs/metrics",
-  "remediation": "restart_service|rollback_deployment|scale_horizontally|fix_config|increase_resources|enable_circuit_breaker|failover|clear_cache|repair_data",
+  "remediation": "ONE of: restart_service, rollback_deployment, scale_horizontally, fix_config, increase_resources, enable_circuit_breaker, failover, clear_cache, repair_data",
   "affected_services": "comma-separated list of ALL affected services including downstream"
 }
 
-Rules:
+CRITICAL RULES:
 1. Output ONLY the JSON object. No markdown, no explanation, no code blocks.
 2. Identify the ROOT CAUSE, not just the most visible symptom.
 3. In your description, reference SPECIFIC evidence (timestamps, metric values, log messages).
 4. Include ALL affected services (including downstream), not just the root cause.
 5. Use the EXACT service names from the logs and topology.
+6. The "remediation" field MUST be EXACTLY one of these 9 values: restart_service, rollback_deployment, scale_horizontally, fix_config, increase_resources, enable_circuit_breaker, failover, clear_cache, repair_data. Do NOT invent other values.
+7. The "root_cause_category" MUST be EXACTLY one of: config_error, memory_leak, resource_exhaustion, network_failure, dependency_failure, code_bug, deployment_regression, data_corruption.
+8. On RETRY: carefully read the feedback. Fix ONLY the fields marked ✗ (wrong). Keep fields marked ✓ (correct) unchanged.
 """).strip()
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
