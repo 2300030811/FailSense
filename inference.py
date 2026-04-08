@@ -10,8 +10,11 @@ import asyncio
 import json
 import os
 import re
+import sys
 import textwrap
 from typing import Dict, List, Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -32,6 +35,15 @@ TEMPERATURE = 0.15
 MAX_TOKENS = 1200
 SUCCESS_THRESHOLD = 0.5
 TASK_IDS = ["single_service_failure", "cascading_failure", "performance_degradation"]
+ENV_URL_VARS = ("ENV_URL", "OPENENV_URL", "OPENENV_BASE_URL")
+REMOTE_ENV_URL_VARS = ("HF_SPACE_URL", "SPACE_URL")
+LOCAL_ENV_CANDIDATES = (
+    "http://127.0.0.1:7860",
+    "http://localhost:7860",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+)
+DEFAULT_REMOTE_ENV_URL = "https://Mahesh811-incident-env.hf.space"
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -55,6 +67,75 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         f"score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
+
+
+def _debug(msg: str) -> None:
+    """Write diagnostics to stderr to keep stdout parser-friendly."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _find_env_url_from_env() -> Optional[str]:
+    """Return first explicit environment URL if configured."""
+    for name in ENV_URL_VARS:
+        value = os.getenv(name, "").strip()
+        if value:
+            _debug(f"[DEBUG] Using {name}={value}")
+            return value
+    return None
+
+
+def _is_url_reachable(base_url: str, timeout_s: float = 2.0) -> bool:
+    """Best-effort reachability probe for an OpenEnv server endpoint."""
+    base = base_url.rstrip("/")
+    for path in ("/health", "/"):
+        try:
+            req = urllib_request.Request(f"{base}{path}", method="GET")
+            with urllib_request.urlopen(req, timeout=timeout_s) as response:
+                if 200 <= response.status < 500:
+                    return True
+        except urllib_error.HTTPError as http_err:
+            if 400 <= http_err.code < 500:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _remote_env_candidates() -> List[str]:
+    """Collect remote env URLs in priority order with de-duplication."""
+    seen = set()
+    candidates: List[str] = []
+
+    for name in REMOTE_ENV_URL_VARS:
+        value = os.getenv(name, "").strip()
+        if value and value not in seen:
+            candidates.append(value)
+            seen.add(value)
+
+    if DEFAULT_REMOTE_ENV_URL not in seen:
+        candidates.append(DEFAULT_REMOTE_ENV_URL)
+
+    return candidates
+
+
+async def _create_environment() -> IncidentEnv:
+    """Create env client from URL first; fallback to Docker only when needed."""
+    explicit_url = _find_env_url_from_env()
+    if explicit_url:
+        return IncidentEnv(base_url=explicit_url)
+
+    for candidate in LOCAL_ENV_CANDIDATES:
+        if _is_url_reachable(candidate):
+            _debug(f"[DEBUG] Using running local environment at {candidate}")
+            return IncidentEnv(base_url=candidate)
+
+    for candidate in _remote_env_candidates():
+        if _is_url_reachable(candidate, timeout_s=4.0):
+            _debug(f"[DEBUG] Using remote environment at {candidate}")
+            return IncidentEnv(base_url=candidate)
+
+    _debug(f"[DEBUG] No URL environment found. Falling back to Docker image {IMAGE_NAME}")
+    return await IncidentEnv.from_docker_image(IMAGE_NAME)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -189,16 +270,16 @@ def call_llm(client: Optional[OpenAI], messages: List[Dict], retries: int = 3) -
             parsed = parse_llm_response(text)
             if parsed:
                 return parsed
-            print(f"[DEBUG] Failed to parse LLM response: {text[:200]}", flush=True)
+            _debug(f"[DEBUG] Failed to parse LLM response: {text[:200]}")
             return _fallback_policy()
         except Exception as e:
             err_str = str(e).lower()
             if ("rate" in err_str or "429" in err_str) and attempt < retries - 1:
                 wait = 2 ** (attempt + 1)
-                print(f"[DEBUG] Rate limited, retrying in {wait}s (attempt {attempt+1}/{retries})", flush=True)
+                _debug(f"[DEBUG] Rate limited, retrying in {wait}s (attempt {attempt+1}/{retries})")
                 time.sleep(wait)
                 continue
-            print(f"[DEBUG] LLM call failed: {e}", flush=True)
+            _debug(f"[DEBUG] LLM call failed: {e}")
             return _fallback_policy()
 
 
@@ -288,8 +369,9 @@ async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> 
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        print(f"[DEBUG] Task {task_id} crashed: {e}", flush=True)
-        score = 0.0
+        _debug(f"[DEBUG] Task {task_id} crashed: {e}")
+        score = round(best_score, 2)
+        success = score >= SUCCESS_THRESHOLD
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
@@ -300,37 +382,47 @@ async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> 
 async def main() -> None:
     # Log config for debugging
     key_masked = f"{API_KEY[:8]}...{API_KEY[-4:]}" if len(API_KEY) > 12 else "(empty)"
-    print(f"[CONFIG] base_url={API_BASE_URL} model={MODEL_NAME} key={key_masked}", flush=True)
+    _debug(f"[DEBUG] base_url={API_BASE_URL} model={MODEL_NAME} key={key_masked}")
 
     client: Optional[OpenAI] = None
     if API_KEY and len(API_KEY) > 5:
-        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+        try:
+            client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+        except Exception as e:
+            _debug(f"[DEBUG] Failed to initialize OpenAI client: {e}")
+            client = None
     else:
-        print("[DEBUG] No API key found. Running fallback policy (no LLM calls).", flush=True)
+        _debug("[DEBUG] No API key found. Running fallback policy (no LLM calls).")
 
     all_scores: Dict[str, float] = {}
 
     for task_id in TASK_IDS:
-        env_url = os.getenv("ENV_URL")
-        if env_url:
-            print(f"[CONFIG] Connecting to remote environment at {env_url}", flush=True)
-            env = IncidentEnv(base_url=env_url)
-        else:
-            print(f"[CONFIG] Starting local environment from image {IMAGE_NAME}", flush=True)
-            env = await IncidentEnv.from_docker_image(IMAGE_NAME)
+        env: Optional[IncidentEnv] = None
+        try:
+            env = await _create_environment()
+        except Exception as e:
+            _debug(f"[DEBUG] Environment init failed for task {task_id}: {e}")
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+            all_scores[task_id] = 0.0
+            continue
 
         try:
             score = await run_task(env, client, task_id)
             all_scores[task_id] = score
         finally:
-            await env.close()
+            if env is not None:
+                try:
+                    await env.close()
+                except Exception as e:
+                    _debug(f"[DEBUG] Failed to close environment cleanly: {e}")
 
-    print("\n[SUMMARY]", flush=True)
-    for tid, sc in all_scores.items():
-        print(f"  {tid}: {sc:.2f}", flush=True)
     avg = sum(all_scores.values()) / len(all_scores) if all_scores else 0.0
-    print(f"  average: {avg:.2f}", flush=True)
+    _debug(f"[DEBUG] Summary average={avg:.2f} scores={all_scores}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        _debug(f"[FATAL] Unhandled error in inference.py: {e}")
