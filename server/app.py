@@ -15,6 +15,9 @@ if _repo_root not in sys.path:
 
 from incident_env.server.app import app  # noqa: E402, F401
 
+def main():
+    from incident_env.server.app import main as _main
+    _main()
+
 if __name__ == "__main__":
-    from incident_env.server.app import main
     main()
