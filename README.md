@@ -33,7 +33,7 @@ distributed systems.
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
 │  AI Agent   │────→│  IncidentEnv │────→│ Scenario Engine  │
-│(inference.py)│←────│   (server)   │←────│ (7 variants)     │
+│(inference.py)│←────│   (server)   │←────│ (12 variants)    │
 └─────────────┘     └──────────────┘     └─────────────────┘
                            │
                     ┌──────┴──────┐
@@ -135,9 +135,9 @@ openenv push --repo-id YOUR_USERNAME/incident-env
 
 | Task | Expected Score (Qwen2.5-72B) |
 |------|------------------------------|
-| single_service_failure | 0.85 - 1.00 |
-| cascading_failure | 0.60 - 0.85 |
-| performance_degradation | 0.40 - 0.70 |
+| single_service_failure | 0.90 - 1.00 |
+| cascading_failure | 0.80 - 0.95 |
+| performance_degradation | 0.85 - 0.95 |
 
 The hard task genuinely challenges frontier models because:
 - No explicit ERROR logs for the root cause

@@ -20,18 +20,9 @@ from incident_env import IncidentAction, IncidentEnv
 
 load_dotenv()
 
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-
-# API key resolution: check provider-specific keys first, then generic ones
-_api_base = API_BASE_URL.lower()
-if "groq" in _api_base:
-    API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-elif "huggingface" in _api_base:
-    API_KEY = os.getenv("HF_TOKEN") or os.getenv("HF_ACCESS_TOKEN") or os.getenv("OPENAI_API_KEY") or ""
-else:
-    API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN") or ""
-
-MODEL_NAME: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY: str = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or ""
+MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 LOCAL_IMAGE_NAME: str = os.getenv("LOCAL_IMAGE_NAME", "incident_env:latest")
 IMAGE_NAME: str = os.getenv("IMAGE_NAME", LOCAL_IMAGE_NAME)
 
