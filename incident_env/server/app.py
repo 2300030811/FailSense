@@ -21,6 +21,19 @@ app = create_app(
 )
 
 
+@app.get("/")
+def read_root():
+    return {
+        "message": "IncidentEnv — Production Incident Response for AI Agents",
+        "status": "running",
+        "documentation": "https://github.com/2300030811/FailSense",
+        "endpoints": {
+            "health": "/health",
+            "environment": "/v1/env"
+        }
+    }
+
+
 def main(host: str = "0.0.0.0", port: int = 8000):
     import uvicorn
     uvicorn.run(app, host=host, port=port)
