@@ -1,9 +1,13 @@
 """
-Root-level baseline inference script for SQL Debug Env.
-Required at repository root by the platform validator.
+inference.py — Baseline inference script for IncidentEnv
+Mandatory stdout format: [START], [STEP], [END] lines per the hackathon spec.
+
+Uses OpenAI Client for all LLM calls.
+Runs all 3 tasks: single_service_failure, cascading_failure, performance_degradation.
 """
 
 import asyncio
+import json
 import os
 import re
 import textwrap
@@ -12,40 +16,32 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from sql_debug_env import SqlDebugAction, SqlDebugEnv
-
+from incident_env import IncidentAction, IncidentEnv
 
 load_dotenv()
 
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY: str = (
-    os.getenv("HF_ACCESS_TOKEN")
-    or os.getenv("HF_TOKEN")
-    or os.getenv("OPENAI_API_KEY")
-    or "HF_ACCESS_TOKEN"
-)
-MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-Coder-32B-Instruct")
-LOCAL_IMAGE_NAME: str = os.getenv("LOCAL_IMAGE_NAME", "sql_debug_env:latest")
-USE_LOCAL_FALLBACK: str = os.getenv("USE_LOCAL_FALLBACK", "auto").strip().lower()
+# API key resolution: check provider-specific keys first, then generic ones
+# Groq, HuggingFace, and OpenAI all use the OpenAI Python client
+_api_base = API_BASE_URL.lower()
+if "groq" in _api_base:
+    API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+elif "huggingface" in _api_base:
+    API_KEY = os.getenv("HF_TOKEN") or os.getenv("HF_ACCESS_TOKEN") or os.getenv("OPENAI_API_KEY") or ""
+else:
+    API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN") or ""
 
-BENCHMARK = "sql_debug_env"
+MODEL_NAME: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+LOCAL_IMAGE_NAME: str = os.getenv("LOCAL_IMAGE_NAME", "incident_env:latest")
+IMAGE_NAME: str = os.getenv("IMAGE_NAME", LOCAL_IMAGE_NAME)
+
+BENCHMARK = "incident_env"
 MAX_STEPS = 5
-TEMPERATURE = 0.1
-MAX_TOKENS = 512
+TEMPERATURE = 0.2
+MAX_TOKENS = 1024
 SUCCESS_THRESHOLD = 0.5
-TASK_IDS = ["fix_query", "write_join", "optimize_query"]
-
-
-def local_fallback_enabled() -> bool:
-    if USE_LOCAL_FALLBACK in {"1", "true", "yes", "on"}:
-        return True
-    if USE_LOCAL_FALLBACK in {"0", "false", "no", "off"}:
-        return False
-    return API_KEY in {"", "HF_ACCESS_TOKEN"}
-
-
-LOCAL_FALLBACK_ENABLED = local_fallback_enabled()
+TASK_IDS = ["single_service_failure", "cascading_failure", "performance_degradation"]
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -71,118 +67,125 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     )
 
 
-def extract_sql(text: str) -> str:
-    m = re.search(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"```\s*(SELECT.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"(SELECT\s+.+?;)", text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    return text.strip()
+SYSTEM_PROMPT = textwrap.dedent("""\
+You are an expert Site Reliability Engineer (SRE) responding to production incidents.
+You will receive incident data: alerts, logs, metrics, service topology, and timeline.
+
+You must respond with a JSON object containing exactly these fields:
+{
+  "severity": "P1_critical|P2_high|P3_medium|P4_low",
+  "root_cause_service": "name of the root cause service",
+  "root_cause_category": "config_error|memory_leak|resource_exhaustion|network_failure|dependency_failure|code_bug|deployment_regression|data_corruption",
+  "root_cause_description": "explanation of what went wrong",
+  "remediation": "restart_service|rollback_deployment|scale_horizontally|fix_config|increase_resources|enable_circuit_breaker|failover|clear_cache|repair_data",
+  "affected_services": "comma-separated list of ALL affected services"
+}
+
+Rules:
+1. Output ONLY the JSON object. No markdown, no explanation, no code blocks.
+2. Identify the ROOT CAUSE, not just the most visible symptom.
+3. Follow the timeline to trace cascading failures back to the origin.
+4. Include ALL affected services (including downstream), not just the root cause.
+5. Be precise with service names — use the exact names from the logs.
+""").strip()
 
 
-def local_sql_policy(task_id: str) -> str:
-    if task_id == "fix_query":
-        return "SELECT name, email FROM customers WHERE city = 'Mumbai' ORDER BY name ASC;"
-    if task_id == "write_join":
-        return (
-            "SELECT c.name AS customer_name, SUM(o.quantity * p.price) AS total_spent "
-            "FROM orders o "
-            "JOIN customers c ON o.customer_id = c.id "
-            "JOIN products p ON o.product_id = p.id "
-            "GROUP BY c.id, c.name "
-            "HAVING SUM(o.quantity * p.price) > 500 "
-            "ORDER BY total_spent DESC;"
-        )
-    if task_id == "optimize_query":
-        return (
-            "SELECT user_id, COUNT(*) AS purchase_count "
-            "FROM events "
-            "WHERE event_type = 'purchase' "
-            "AND created_at >= date('now', '-30 days') "
-            "GROUP BY user_id "
-            "HAVING COUNT(*) > 3 "
-            "ORDER BY purchase_count DESC;"
-        )
-    return "SELECT 1;"
-
-
-SYSTEM_PROMPT = textwrap.dedent(
-    """
-    You are an expert SQL developer. You write correct, efficient SQLite queries.
-
-    Rules:
-    1. Output your SQL inside a ```sql code block - nothing else outside it.
-    2. Use only SQLite-compatible syntax.
-    3. If fixing a broken query, find all bugs and fix them in one shot.
-    4. If writing from scratch, read the schema carefully first.
-    5. Do not write explanations outside the code block.
-"""
-).strip()
-
-
-def build_prompt(obs_data: Dict[str, str], step: int, prev_error: str = "") -> str:
+def build_prompt(obs, step: int, prev_feedback: str = "", prev_hint: str = "") -> str:
     parts = [
-        f"Step {step}/{MAX_STEPS}",
-        f"\nTask:\n{obs_data.get('task_description', '')}",
-        f"\nSchema:\n{obs_data.get('schema_info', '')}",
+        f"=== INCIDENT RESPONSE (Step {step}/{MAX_STEPS}) ===",
+        f"\n--- TASK ---\n{obs.task_description}",
+        f"\n--- ALERT ---\n{obs.incident_summary}",
+        f"\n--- SERVICE TOPOLOGY ---\n{obs.service_topology}",
+        f"\n--- LOGS ---\n{obs.log_entries}",
+        f"\n--- METRICS ---\n{obs.metrics_snapshot}",
+        f"\n--- TIMELINE ---\n{obs.timeline}",
     ]
-    if obs_data.get("broken_query"):
-        parts.append(f"\nBroken query to fix or optimize:\n{obs_data['broken_query']}")
-    if obs_data.get("explain_plan"):
-        parts.append(f"\nEXPLAIN QUERY PLAN:\n{obs_data['explain_plan']}")
-    if prev_error:
-        parts.append(f"\nYour previous query caused this error: {prev_error}")
-        parts.append("Fix it and try again.")
-    parts.append("\nWrite the correct SQL query now:")
+    if prev_feedback:
+        parts.append(f"\n--- FEEDBACK ON YOUR LAST ATTEMPT ---\n{prev_feedback}")
+    if prev_hint:
+        parts.append(f"\n--- HINT ---\n{prev_hint}")
+    parts.append("\nProvide your diagnosis as a JSON object:")
     return "\n".join(parts)
 
 
-def call_llm(client: OpenAI, prompt: str) -> str:
+def parse_llm_response(text: str) -> Dict[str, str]:
+    """Extract JSON from LLM response."""
+    # Try to find JSON in code blocks first
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Try raw JSON
+    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    # Fallback: try to parse the whole thing
     try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            stream=False,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        print(f"[DEBUG] LLM call failed, using local fallback: {e}", flush=True)
-        return ""
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    return {}
 
 
-def choose_sql(
-    client: Optional[OpenAI],
-    task_id: str,
-    obs_data: Dict[str, str],
-    step: int,
-    prev_error: str,
-) -> str:
+def call_llm(client: Optional[OpenAI], prompt: str, retries: int = 3) -> Dict[str, str]:
+    """Call the LLM and parse the response. Retries on rate limits."""
     if client is None:
-        return local_sql_policy(task_id)
+        return _fallback_policy()
 
-    prompt = build_prompt(obs_data, step, prev_error)
-    response = call_llm(client, prompt)
-    sql = extract_sql(response)
-    if sql:
-        return sql
-    return local_sql_policy(task_id)
+    import time
+    for attempt in range(retries):
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                stream=False,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            parsed = parse_llm_response(text)
+            if parsed:
+                return parsed
+            print(f"[DEBUG] Failed to parse LLM response: {text[:200]}", flush=True)
+            return _fallback_policy()
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("rate" in err_str or "429" in err_str) and attempt < retries - 1:
+                wait = 2 ** (attempt + 1)
+                print(f"[DEBUG] Rate limited, retrying in {wait}s (attempt {attempt+1}/{retries})", flush=True)
+                time.sleep(wait)
+                continue
+            print(f"[DEBUG] LLM call failed: {e}", flush=True)
+            return _fallback_policy()
 
 
-async def run_task(env: SqlDebugEnv, client: Optional[OpenAI], task_id: str) -> float:
+def _fallback_policy() -> Dict[str, str]:
+    """Fallback when LLM is unavailable."""
+    return {
+        "severity": "P1_critical",
+        "root_cause_service": "user-service",
+        "root_cause_category": "resource_exhaustion",
+        "root_cause_description": "Service failure detected",
+        "remediation": "restart_service",
+        "affected_services": "user-service,api-gateway",
+    }
+
+
+async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> float:
     rewards: List[float] = []
     steps_taken = 0
     best_score = 0.0
     success = False
-    prev_error = ""
+    prev_feedback = ""
+    prev_hint = ""
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
@@ -194,35 +197,34 @@ async def run_task(env: SqlDebugEnv, client: Optional[OpenAI], task_id: str) -> 
             if result.done:
                 break
 
-            obs_dict = {
-                "task_description": obs.task_description,
-                "schema_info": obs.schema_info,
-                "broken_query": obs.broken_query or "",
-                "explain_plan": obs.explain_plan or "",
-            }
+            prompt = build_prompt(obs, step, prev_feedback, prev_hint)
+            action_dict = call_llm(client, prompt)
 
-            sql = choose_sql(
-                client=client,
-                task_id=task_id,
-                obs_data=obs_dict,
-                step=step,
-                prev_error=prev_error,
+            action = IncidentAction(
+                severity=action_dict.get("severity", "P1_critical"),
+                root_cause_service=action_dict.get("root_cause_service", "unknown"),
+                root_cause_category=action_dict.get("root_cause_category", "code_bug"),
+                root_cause_description=action_dict.get("root_cause_description", ""),
+                remediation=action_dict.get("remediation", "restart_service"),
+                affected_services=action_dict.get("affected_services", ""),
             )
 
-            result = await env.step(SqlDebugAction(sql_query=sql))
+            result = await env.step(action)
             obs = result.observation
             reward = result.reward or 0.0
             done = result.done
-            error = obs.error_message
 
             rewards.append(reward)
             steps_taken = step
-            prev_error = error or ""
 
             if reward > best_score:
                 best_score = reward
 
-            log_step(step=step, action=sql, reward=reward, done=done, error=error)
+            action_summary = f"svc={action.root_cause_service} cat={action.root_cause_category} rem={action.remediation}"
+            log_step(step=step, action=action_summary, reward=reward, done=done, error=None)
+
+            prev_feedback = obs.feedback or ""
+            prev_hint = obs.hint or ""
 
             if done:
                 break
@@ -241,16 +243,20 @@ async def run_task(env: SqlDebugEnv, client: Optional[OpenAI], task_id: str) -> 
 
 
 async def main() -> None:
+    # Log config for debugging
+    key_masked = f"{API_KEY[:8]}...{API_KEY[-4:]}" if len(API_KEY) > 12 else "(empty)"
+    print(f"[CONFIG] base_url={API_BASE_URL} model={MODEL_NAME} key={key_masked}", flush=True)
+
     client: Optional[OpenAI] = None
-    if not LOCAL_FALLBACK_ENABLED:
+    if API_KEY and len(API_KEY) > 5:
         client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     else:
-        print("[DEBUG] Running local fallback policy (no external model calls).", flush=True)
+        print("[DEBUG] No API key found. Running fallback policy (no LLM calls).", flush=True)
 
     all_scores: Dict[str, float] = {}
 
     for task_id in TASK_IDS:
-        env = await SqlDebugEnv.from_docker_image(LOCAL_IMAGE_NAME)
+        env = await IncidentEnv.from_docker_image(IMAGE_NAME)
         try:
             score = await run_task(env, client, task_id)
             all_scores[task_id] = score
@@ -260,7 +266,7 @@ async def main() -> None:
     print("\n[SUMMARY]", flush=True)
     for tid, sc in all_scores.items():
         print(f"  {tid}: {sc:.2f}", flush=True)
-    avg = sum(all_scores.values()) / len(all_scores)
+    avg = sum(all_scores.values()) / len(all_scores) if all_scores else 0.0
     print(f"  average: {avg:.2f}", flush=True)
 
 

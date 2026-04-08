@@ -6,9 +6,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the incident_env package into /app/incident_env
-# so imports like `from incident_env.server.app import app` work
-COPY incident_env /app/incident_env
+# For HuggingFace Spaces: files are at root, package them as incident_env
+COPY . /app/incident_env
 
 # Install dependencies
 RUN pip install --no-cache-dir \
