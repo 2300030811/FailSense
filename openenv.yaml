@@ -9,9 +9,21 @@ tasks:
   - id: single_service_failure
     difficulty: easy
     description: "Diagnose a single service outage from clear error logs and metrics"
+    max_steps: 10
+    grader:
+      type: llm
+      prompt_template: "Score 0.0 to 1.0..."
   - id: cascading_failure
     difficulty: medium
     description: "Trace a cascading failure across multiple services to find the root cause"
+    max_steps: 15
+    grader:
+      type: llm
+      prompt_template: "Score 0.0 to 1.0..."
   - id: performance_degradation
     difficulty: hard
     description: "Identify a subtle performance issue with red herrings and no explicit errors"
+    max_steps: 20
+    grader:
+      type: llm
+      prompt_template: "Score 0.0 to 1.0..."
