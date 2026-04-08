@@ -67,6 +67,72 @@ class IncidentEnvironment(Environment):
             metadata={"message": "Incident detected. Analyze and respond.", "scenario": self._scenario.scenario_name},
         )
 
+    def _build_feedback(self, action: IncidentAction, grading_info: dict, score: float) -> str:
+        """Build detailed, actionable feedback from grading results."""
+        parts = []
+
+        # Per-dimension feedback
+        sev_info = grading_info.get("severity", "")
+        if "correct" in sev_info:
+            parts.append("✓ Severity: correct.")
+        elif "close" in sev_info:
+            parts.append(f"~ Severity: close but not exact. {sev_info}")
+        else:
+            parts.append(f"✗ Severity: incorrect. You said '{action.severity}'.")
+
+        svc_info = grading_info.get("root_cause_service", "")
+        if "correct" in svc_info:
+            parts.append("✓ Root cause service: correct.")
+        else:
+            parts.append(f"✗ Root cause service: '{action.root_cause_service}' is NOT the root cause. Look deeper at what CAUSED the failure chain.")
+
+        cat_info = grading_info.get("root_cause_category", "")
+        if "correct" in cat_info:
+            parts.append("✓ Root cause category: correct.")
+        elif "close" in cat_info:
+            parts.append(f"~ Root cause category: close but not precise. You said '{action.root_cause_category}'.")
+        else:
+            parts.append(f"✗ Root cause category: '{action.root_cause_category}' does not match the failure mode.")
+
+        kw_info = grading_info.get("description_keywords", "")
+        parts.append(f"  Description quality: {kw_info}")
+
+        rem_info = grading_info.get("remediation", "")
+        if "correct" in rem_info:
+            parts.append("✓ Remediation: correct.")
+        elif "acceptable" in rem_info:
+            parts.append(f"~ Remediation: acceptable but not optimal. {rem_info}")
+        else:
+            parts.append(f"✗ Remediation: '{action.remediation}' won't fix this issue.")
+
+        iou_info = grading_info.get("affected_services_iou", "")
+        detail = grading_info.get("affected_services_detail", {})
+        if iou_info == "100%":
+            parts.append("✓ Affected services: all correctly identified.")
+        else:
+            missing = detail.get("missing", [])
+            extra = detail.get("extra", [])
+            msg = f"~ Affected services: IoU={iou_info}."
+            if missing:
+                msg += f" Missing: {', '.join(missing)}."
+            if extra:
+                msg += f" Extra (not affected): {', '.join(extra)}."
+            parts.append(msg)
+
+        # Overall score
+        parts.append(f"\nScore this step: {score:.2f}/1.00")
+
+        if score >= 0.90:
+            parts.insert(0, "🎯 EXCELLENT DIAGNOSIS — all key elements correct!")
+        elif score >= 0.70:
+            parts.insert(0, "⚠️ GOOD but not perfect — review the items marked ✗ below:")
+        elif score >= 0.40:
+            parts.insert(0, "❌ PARTIALLY CORRECT — several elements need improvement:")
+        else:
+            parts.insert(0, "❌ MOSTLY INCORRECT — re-read the logs and timeline carefully:")
+
+        return "\n".join(parts)
+
     def step(self, action: IncidentAction, timeout_s=None, **kwargs) -> IncidentObservation:
         """Grade agent's incident response and return feedback."""
         if self._scenario is None:
@@ -92,21 +158,8 @@ class IncidentEnvironment(Environment):
 
         done = score >= 0.90 or self._state.step_count >= MAX_STEPS
 
-        # Build feedback
-        feedback_parts = []
-        if grading_info.get("root_cause_service", "").startswith("wrong"):
-            feedback_parts.append(f"Incorrect root cause service. You said '{action.root_cause_service}'.")
-        if grading_info.get("severity", "").startswith("wrong"):
-            feedback_parts.append(f"Severity assessment incorrect.")
-        if grading_info.get("remediation", "").startswith("wrong"):
-            feedback_parts.append(f"Remediation '{action.remediation}' is not appropriate.")
-        if "missing" in str(grading_info.get("affected_services_detail", "")):
-            feedback_parts.append("You missed some affected services.")
-        if not feedback_parts and score < 0.90:
-            feedback_parts.append("Partially correct. Improve your analysis.")
-        if score >= 0.90:
-            feedback_parts.append("Excellent diagnosis! All key elements correct.")
-        feedback = " ".join(feedback_parts) if feedback_parts else None
+        # Build structured feedback
+        feedback = self._build_feedback(action, grading_info, score)
 
         # Progressive hint (on step 2+)
         hint = None

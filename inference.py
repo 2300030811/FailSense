@@ -23,7 +23,6 @@ load_dotenv()
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
 # API key resolution: check provider-specific keys first, then generic ones
-# Groq, HuggingFace, and OpenAI all use the OpenAI Python client
 _api_base = API_BASE_URL.lower()
 if "groq" in _api_base:
     API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -38,8 +37,8 @@ IMAGE_NAME: str = os.getenv("IMAGE_NAME", LOCAL_IMAGE_NAME)
 
 BENCHMARK = "incident_env"
 MAX_STEPS = 5
-TEMPERATURE = 0.2
-MAX_TOKENS = 1024
+TEMPERATURE = 0.15
+MAX_TOKENS = 1200
 SUCCESS_THRESHOLD = 0.5
 TASK_IDS = ["single_service_failure", "cascading_failure", "performance_degradation"]
 
@@ -67,46 +66,90 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Enhanced System Prompt with SRE reasoning tactics
+# ═══════════════════════════════════════════════════════════════════════
+
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are an expert Site Reliability Engineer (SRE) responding to production incidents.
 You will receive incident data: alerts, logs, metrics, service topology, and timeline.
 
+REASONING FRAMEWORK — follow this EVERY time:
+1. TIMELINE FIRST: Read the timeline chronologically. The FIRST service anomaly is likely the root cause.
+2. DISTINGUISH SYMPTOM vs CAUSE: Downstream failures are SYMPTOMS, not the root cause.
+   Example: If user-service fails because user-db pool exhausted, the root cause is user-db, NOT user-service.
+3. IGNORE RED HERRINGS: Some alerts are unrelated (weekly reports, security scans, normal TTL churn).
+   If an alert doesn't connect to the failure chain, ignore it.
+4. CHECK DEPLOYMENTS: If a deployment happened right before issues, it's likely the cause.
+5. LOOK AT TRENDS: For performance issues, memory/connections growing linearly = leak.
+6. CASCADE TRACING: For multi-service failures, trace errors UPSTREAM to the origin.
+
 You must respond with a JSON object containing exactly these fields:
 {
   "severity": "P1_critical|P2_high|P3_medium|P4_low",
-  "root_cause_service": "name of the root cause service",
+  "root_cause_service": "name of the service that is the PRIMARY root cause",
   "root_cause_category": "config_error|memory_leak|resource_exhaustion|network_failure|dependency_failure|code_bug|deployment_regression|data_corruption",
-  "root_cause_description": "explanation of what went wrong",
+  "root_cause_description": "detailed explanation of what went wrong and why — include specific evidence from logs/metrics",
   "remediation": "restart_service|rollback_deployment|scale_horizontally|fix_config|increase_resources|enable_circuit_breaker|failover|clear_cache|repair_data",
-  "affected_services": "comma-separated list of ALL affected services"
+  "affected_services": "comma-separated list of ALL affected services including downstream"
 }
 
 Rules:
 1. Output ONLY the JSON object. No markdown, no explanation, no code blocks.
 2. Identify the ROOT CAUSE, not just the most visible symptom.
-3. Follow the timeline to trace cascading failures back to the origin.
+3. In your description, reference SPECIFIC evidence (timestamps, metric values, log messages).
 4. Include ALL affected services (including downstream), not just the root cause.
-5. Be precise with service names — use the exact names from the logs.
+5. Use the EXACT service names from the logs and topology.
 """).strip()
 
 
-def build_prompt(obs, step: int, prev_feedback: str = "", prev_hint: str = "") -> str:
+# ═══════════════════════════════════════════════════════════════════════
+#  Prompt building with conversation history
+# ═══════════════════════════════════════════════════════════════════════
+
+def build_initial_prompt(obs) -> str:
+    """Build the first observation prompt."""
     parts = [
-        f"=== INCIDENT RESPONSE (Step {step}/{MAX_STEPS}) ===",
+        "=== INCIDENT TRIAGE ===",
         f"\n--- TASK ---\n{obs.task_description}",
         f"\n--- ALERT ---\n{obs.incident_summary}",
         f"\n--- SERVICE TOPOLOGY ---\n{obs.service_topology}",
         f"\n--- LOGS ---\n{obs.log_entries}",
         f"\n--- METRICS ---\n{obs.metrics_snapshot}",
         f"\n--- TIMELINE ---\n{obs.timeline}",
+        "\nAnalyze this incident step by step, then provide your diagnosis as a JSON object.",
     ]
-    if prev_feedback:
-        parts.append(f"\n--- FEEDBACK ON YOUR LAST ATTEMPT ---\n{prev_feedback}")
-    if prev_hint:
-        parts.append(f"\n--- HINT ---\n{prev_hint}")
-    parts.append("\nProvide your diagnosis as a JSON object:")
     return "\n".join(parts)
 
+
+def build_retry_prompt(obs, step: int, prev_action: Dict, prev_feedback: str = "", prev_hint: str = "") -> str:
+    """Build a follow-up prompt incorporating feedback from the previous attempt."""
+    parts = [
+        f"=== INCIDENT TRIAGE — RETRY (Step {step}/{MAX_STEPS}) ===",
+        f"\nYour previous diagnosis was INCORRECT. Here's what went wrong:",
+        f"\n--- FEEDBACK ---\n{prev_feedback}",
+    ]
+    if prev_hint:
+        parts.append(f"\n--- HINT ---\n{prev_hint}")
+
+    parts.append(f"\nYour previous answer was:")
+    parts.append(json.dumps(prev_action, indent=2))
+
+    parts.append("\n--- REMINDER: KEY DATA ---")
+    parts.append(f"Timeline:\n{obs.timeline}")
+    parts.append(f"\nMetrics:\n{obs.metrics_snapshot}")
+
+    parts.append(
+        "\nUSE the feedback and hint above to CORRECT your diagnosis. "
+        "Focus on the fields marked ✗ (wrong). "
+        "Provide your corrected diagnosis as a JSON object."
+    )
+    return "\n".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LLM interaction
+# ═══════════════════════════════════════════════════════════════════════
 
 def parse_llm_response(text: str) -> Dict[str, str]:
     """Extract JSON from LLM response."""
@@ -132,8 +175,8 @@ def parse_llm_response(text: str) -> Dict[str, str]:
     return {}
 
 
-def call_llm(client: Optional[OpenAI], prompt: str, retries: int = 3) -> Dict[str, str]:
-    """Call the LLM and parse the response. Retries on rate limits."""
+def call_llm(client: Optional[OpenAI], messages: List[Dict], retries: int = 3) -> Dict[str, str]:
+    """Call the LLM with full conversation history."""
     if client is None:
         return _fallback_policy()
 
@@ -142,10 +185,7 @@ def call_llm(client: Optional[OpenAI], prompt: str, retries: int = 3) -> Dict[st
         try:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=messages,
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
                 stream=False,
@@ -179,13 +219,15 @@ def _fallback_policy() -> Dict[str, str]:
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Task runner with conversation memory
+# ═══════════════════════════════════════════════════════════════════════
+
 async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> float:
     rewards: List[float] = []
     steps_taken = 0
     best_score = 0.0
     success = False
-    prev_feedback = ""
-    prev_hint = ""
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
@@ -193,12 +235,33 @@ async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> 
         result = await env.reset(task_id=task_id)
         obs = result.observation
 
+        # Conversation history for multi-turn reasoning
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_initial_prompt(obs)},
+        ]
+
+        prev_action_dict = None
+
         for step in range(1, MAX_STEPS + 1):
             if result.done:
                 break
 
-            prompt = build_prompt(obs, step, prev_feedback, prev_hint)
-            action_dict = call_llm(client, prompt)
+            # Build prompt: initial for step 1, retry for step 2+
+            if step > 1 and prev_action_dict:
+                retry_prompt = build_retry_prompt(
+                    obs, step,
+                    prev_action_dict,
+                    obs.feedback or "",
+                    obs.hint or "",
+                )
+                messages.append({"role": "user", "content": retry_prompt})
+
+            action_dict = call_llm(client, messages)
+            prev_action_dict = action_dict
+
+            # Add assistant response to conversation history
+            messages.append({"role": "assistant", "content": json.dumps(action_dict)})
 
             action = IncidentAction(
                 severity=action_dict.get("severity", "P1_critical"),
@@ -222,9 +285,6 @@ async def run_task(env: IncidentEnv, client: Optional[OpenAI], task_id: str) -> 
 
             action_summary = f"svc={action.root_cause_service} cat={action.root_cause_category} rem={action.remediation}"
             log_step(step=step, action=action_summary, reward=reward, done=done, error=None)
-
-            prev_feedback = obs.feedback or ""
-            prev_hint = obs.hint or ""
 
             if done:
                 break
@@ -256,7 +316,14 @@ async def main() -> None:
     all_scores: Dict[str, float] = {}
 
     for task_id in TASK_IDS:
-        env = await IncidentEnv.from_docker_image(IMAGE_NAME)
+        env_url = os.getenv("ENV_URL")
+        if env_url:
+            print(f"[CONFIG] Connecting to remote environment at {env_url}", flush=True)
+            env = IncidentEnv(base_url=env_url)
+        else:
+            print(f"[CONFIG] Starting local environment from image {IMAGE_NAME}", flush=True)
+            env = await IncidentEnv.from_docker_image(IMAGE_NAME)
+
         try:
             score = await run_task(env, client, task_id)
             all_scores[task_id] = score

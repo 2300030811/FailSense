@@ -491,13 +491,333 @@ def _build_task3_v1():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  NEW VARIANTS — Added for deeper evaluation coverage
+# ═══════════════════════════════════════════════════════════════════════
+
+def _build_task1_v3():
+    """auth-db replication lag causing stale reads."""
+    logs = "\n".join([
+        f"[{_ts(12,0,0)}] auth-db          INFO   Primary-replica lag: 0ms | normal",
+        f"[{_ts(12,15,0)}] auth-db          WARN   Replica lag: 4500ms | bulk import running on primary",
+        f"[{_ts(12,15,5)}] auth-service     WARN   Token lookup returned stale data | user=u-4421 | replica",
+        f"[{_ts(12,15,8)}] auth-service     ERROR  Session validation mismatch: token revoked on primary but valid on replica",
+        f"[{_ts(12,15,12)}] auth-service     ERROR  14 stale-read errors in 30s | all from replica pool",
+        f"[{_ts(12,15,15)}] api-gateway      WARN   Intermittent auth failures: 12% of requests | inconsistent 401/200",
+        f"[{_ts(12,15,20)}] auth-db          WARN   Replica lag: 8200ms | WAL apply backlog=456MB",
+        f"[{_ts(12,15,25)}] user-service     INFO   Health check OK | latency_p99=14ms",
+        f"[{_ts(12,15,25)}] order-service    INFO   Health check OK | latency_p99=41ms",
+        f"[{_ts(12,15,30)}] auth-service     ERROR  Revoked tokens still passing validation on 2/3 replicas",
+    ])
+    metrics = (
+        "Service             |CPU |Mem |Latency_p99|Error_Rate|Status\n"
+        "--------------------|----|----|-----------|----------|--------\n"
+        "auth-db (primary)   |92% |78% |12ms       |0.0%      |overloaded\n"
+        "auth-db (replica-1) |45% |72% |8200ms lag |12.0%     |lagging\n"
+        "auth-db (replica-2) |42% |70% |8100ms lag |11.8%     |lagging\n"
+        "auth-service        |34% |55% |45ms       |12.0%     |degraded\n"
+        "api-gateway         |28% |51% |89ms       |12.0%     |degraded\n"
+        "user-service        |14% |42% |14ms       |0.0%      |healthy\n"
+        "order-service       |18% |44% |41ms       |0.0%      |healthy"
+    )
+    timeline = (
+        "12:00:00  auth-db replication healthy (0ms lag)\n"
+        "12:15:00  Bulk import started on primary → replica lag 4500ms\n"
+        "12:15:05  auth-service stale reads from replicas\n"
+        "12:15:12  14 stale-read errors (revoked tokens accepted)\n"
+        "12:15:20  Replica lag 8200ms, WAL backlog 456MB\n"
+        "12:15:30  Revoked tokens still valid on 2/3 replicas"
+    )
+    return Scenario(
+        task_id="single_service_failure", variant_id=3,
+        scenario_name="Database Replication Lag",
+        severity="P2_high",
+        root_cause_service="auth-db",
+        root_cause_category="resource_exhaustion",
+        root_cause_keywords=["replication", "lag", "replica", "stale", "WAL", "bulk", "import"],
+        remediation="fix_config",
+        acceptable_remediations=["restart_service", "increase_resources"],
+        affected_services=["auth-db", "auth-service", "api-gateway"],
+        incident_summary="ALERT [P2] auth-service: 12% intermittent auth failures\nTriggered: 12:15:12 UTC\nImpact: Revoked tokens sporadically accepted\nOn-call: You",
+        service_topology=ECOMMERCE_TOPOLOGY,
+        log_entries=logs, metrics_snapshot=metrics, timeline=timeline,
+        hints=[
+            "Some auth requests succeed, some fail. Why inconsistency?",
+            "auth-service reads from replicas. Primary and replicas disagree.",
+            "auth-db replica lag is 8200ms. Bulk import on primary caused WAL backlog.",
+        ],
+    )
+
+
+def _build_task2_v2():
+    """order-service circuit breaker mis-configuration causes amplified failure."""
+    logs = "\n".join([
+        f"[{_ts(15,0,0)}] inventory-service WARN   Latency spike: p99=1200ms (normal: 50ms) | DB vacuum running",
+        f"[{_ts(15,0,5)}] order-service     WARN   inventory-service slow: 1200ms | circuit_breaker threshold=500ms",
+        f"[{_ts(15,0,6)}] order-service     WARN   Circuit breaker OPEN for inventory-service (threshold: 3 failures in 5s)",
+        f"[{_ts(15,0,7)}] order-service     ERROR  All inventory calls rejected by circuit breaker | 100% failure",
+        f"[{_ts(15,0,8)}] order-service     WARN   CB half-open: testing 1 request to inventory-service",
+        f"[{_ts(15,0,9)}] order-service     WARN   CB test request: 800ms (still > 500ms threshold) → OPEN again",
+        f"[{_ts(15,0,12)}] api-gateway      ERROR  POST /api/orders: 100% failure rate",
+        f"[{_ts(15,0,15)}] inventory-service INFO   Vacuum complete. Latency recovering: p99=120ms",
+        f"[{_ts(15,0,18)}] order-service     WARN   CB half-open test: 120ms → SUCCESS but already tripped 45 failures",
+        f"[{_ts(15,0,20)}] order-service     ERROR  CB recovery too slow: reset_timeout=60s | still rejecting",
+        f"[{_ts(15,0,20)}] user-service     INFO   Health check OK | latency_p99=14ms",
+        f"[{_ts(15,0,20)}] product-service  INFO   Health check OK | latency_p99=12ms",
+    ])
+    metrics = (
+        "Service             |CPU |Mem |Latency_p99|Error_Rate|CB_State |Status\n"
+        "--------------------|----|----|-----------|----------|---------|--------\n"
+        "order-service       |12% |45% |N/A        |100.0%    |OPEN     |DOWN\n"
+        "inventory-service   |35% |55% |120ms      |0.0%      |N/A      |recovered\n"
+        "inventory-db        |78% |68% |45ms       |0.0%      |N/A      |healthy\n"
+        "api-gateway         |28% |51% |N/A        |100.0%    |N/A      |critical\n"
+        "user-service        |14% |42% |14ms       |0.0%      |N/A      |healthy\n"
+        "product-service     |18% |44% |12ms       |0.0%      |N/A      |healthy"
+    )
+    timeline = (
+        "15:00:00  inventory-service latency spike (DB vacuum)\n"
+        "15:00:06  order-service circuit breaker OPENS (threshold too aggressive: 3 fails / 500ms)\n"
+        "15:00:07  ALL order requests rejected\n"
+        "15:00:15  inventory-service RECOVERS (vacuum done)\n"
+        "15:00:20  order-service CB still OPEN (60s reset timeout) — orders still failing"
+    )
+    return Scenario(
+        task_id="cascading_failure", variant_id=2,
+        scenario_name="Circuit Breaker Misconfiguration Amplifies Transient Failure",
+        severity="P1_critical",
+        root_cause_service="order-service",
+        root_cause_category="config_error",
+        root_cause_keywords=["circuit", "breaker", "threshold", "config", "aggressive", "timeout", "reset"],
+        remediation="fix_config",
+        acceptable_remediations=["restart_service"],
+        affected_services=["order-service", "api-gateway"],
+        incident_summary=(
+            "ALERT [P1] order-service: 100% failure rate — all orders rejected\n"
+            "ALERT [P1] api-gateway: POST /api/orders failing\n"
+            "Note: inventory-service has RECOVERED but orders still fail.\nOn-call: You"
+        ),
+        service_topology=ECOMMERCE_TOPOLOGY,
+        log_entries=logs, metrics_snapshot=metrics, timeline=timeline,
+        hints=[
+            "inventory-service recovered. Why are orders still failing?",
+            "order-service circuit breaker is OPEN with a 60s reset timeout.",
+            "CB config: threshold=500ms, 3 failures → OPEN, reset_timeout=60s. WAY too aggressive.",
+        ],
+    )
+
+
+def _build_task2_v3():
+    """DNS resolution failure cascading across multiple services."""
+    logs = "\n".join([
+        f"[{_ts(3,45,0)}] api-gateway      INFO   DNS cache TTL expired for *.internal.svc",
+        f"[{_ts(3,45,2)}] api-gateway      ERROR  DNS resolution failed: SERVFAIL for user-service.internal.svc",
+        f"[{_ts(3,45,3)}] api-gateway      ERROR  DNS resolution failed: SERVFAIL for product-service.internal.svc",
+        f"[{_ts(3,45,4)}] api-gateway      ERROR  DNS resolution failed: SERVFAIL for order-service.internal.svc",
+        f"[{_ts(3,45,5)}] user-service     ERROR  DNS resolution failed: SERVFAIL for user-db.internal.svc",
+        f"[{_ts(3,45,6)}] product-service  ERROR  DNS resolution failed: SERVFAIL for product-db.internal.svc",
+        f"[{_ts(3,45,8)}] api-gateway      ERROR  All upstream services unreachable | 100% error rate",
+        f"[{_ts(3,45,10)}] auth-service     ERROR  Cannot reach auth-db: DNS SERVFAIL",
+        f"[{_ts(3,45,12)}] order-service    ERROR  Cannot reach order-db, payment-service: DNS SERVFAIL",
+        f"[{_ts(3,45,15)}] coredns          ERROR  FATAL: certificate expired at 2024-06-15T03:44:59Z | mTLS handshake failed with upstream",
+        f"[{_ts(3,45,18)}] coredns          ERROR  All upstream DNS forwarders unreachable | serving SERVFAIL",
+    ])
+    metrics = (
+        "Service             |CPU |Mem |Latency_p99|Error_Rate|DNS     |Status\n"
+        "--------------------|----|----|-----------|----------|--------|--------\n"
+        "coredns             |2%  |12% |N/A        |100.0%    |FAILING |DOWN\n"
+        "api-gateway         |8%  |51% |N/A        |100.0%    |FAILING |DOWN\n"
+        "user-service        |5%  |42% |N/A        |100.0%    |FAILING |DOWN\n"
+        "product-service     |4%  |44% |N/A        |100.0%    |FAILING |DOWN\n"
+        "order-service       |3%  |38% |N/A        |100.0%    |FAILING |DOWN\n"
+        "auth-service        |2%  |39% |N/A        |100.0%    |FAILING |DOWN\n"
+        "payment-service     |2%  |35% |N/A        |100.0%    |FAILING |DOWN"
+    )
+    timeline = (
+        "03:44:59  CoreDNS mTLS certificate expires\n"
+        "03:45:00  DNS cache TTL expires across services\n"
+        "03:45:02  First DNS SERVFAIL at api-gateway\n"
+        "03:45:05  All services losing DNS resolution\n"
+        "03:45:08  Platform-wide outage — every service unreachable\n"
+        "03:45:15  CoreDNS logs: certificate expired, upstream unreachable"
+    )
+    return Scenario(
+        task_id="cascading_failure", variant_id=3,
+        scenario_name="DNS Certificate Expiry Cascade",
+        severity="P1_critical",
+        root_cause_service="coredns",
+        root_cause_category="config_error",
+        root_cause_keywords=["DNS", "certificate", "expired", "mTLS", "SERVFAIL", "resolution", "coredns"],
+        remediation="fix_config",
+        acceptable_remediations=["restart_service"],
+        affected_services=["coredns", "api-gateway", "user-service", "product-service",
+                           "order-service", "auth-service", "payment-service"],
+        incident_summary=(
+            "ALERT [P1] PLATFORM-WIDE OUTAGE: All services unreachable\n"
+            "ALERT [P1] 100% error rate across api-gateway, user, product, order, auth, payment\n"
+            "Time: 03:45 UTC\n"
+            "Impact: Complete platform failure.\nOn-call: You"
+        ),
+        service_topology=ECOMMERCE_TOPOLOGY + "\n  [coredns] provides DNS for all *.internal.svc addresses",
+        log_entries=logs, metrics_snapshot=metrics, timeline=timeline,
+        hints=[
+            "ALL services failing simultaneously. What do they all share?",
+            "Every service fails with DNS SERVFAIL. DNS is the common dependency.",
+            "CoreDNS mTLS certificate expired at 03:44:59. Renew the certificate.",
+        ],
+    )
+
+
+def _build_task3_v2():
+    """Slow disk I/O after silent RAID degradation — no errors, just creeping latency."""
+    logs = "\n".join([
+        f"[{_ts(6,0,0)}] order-db         INFO   Disk I/O: read=2ms write=3ms | RAID-10 healthy",
+        f"[{_ts(8,0,0)}] order-db         INFO   Disk I/O: read=8ms write=12ms | no errors",
+        f"[{_ts(10,0,0)}] order-db         WARN   Disk I/O: read=25ms write=45ms | no errors",
+        f"[{_ts(10,0,5)}] order-service    INFO   OK | p99=120ms (was 45ms) | 0% errors",
+        f"[{_ts(11,0,0)}] order-db         WARN   Disk I/O: read=67ms write=134ms | no errors | SMART OK",
+        f"[{_ts(11,0,3)}] order-service    WARN   p99=340ms (SLA: 200ms) | 0% errors | queries correct",
+        f"[{_ts(11,0,5)}] api-gateway      WARN   order-service p99=340ms > 200ms SLA",
+        f"[{_ts(11,30,0)}] inventory-service WARN   Batch sync slow: 34s (normal: 5s) <- reads from order-db",
+        f"[{_ts(12,0,0)}] order-db         WARN   Disk I/O: read=145ms write=289ms | RAID: 1 disk DEGRADED (silent fail at 07:23)",
+        f"[{_ts(12,0,5)}] order-service    ERROR  p99=890ms | timeouts starting | still 0% query errors",
+        f"[{_ts(12,0,5)}] product-service  INFO   Health check OK | p99=13ms",
+        f"[{_ts(12,0,5)}] user-service     INFO   Health check OK | p99=14ms",
+        f"[{_ts(12,0,5)}] cache-service    INFO   Health check OK | hit_ratio=93%",
+    ])
+    metrics = (
+        "Service             |CPU |Mem |Latency_p99|Error_Rate|Disk_IO |Status\n"
+        "--------------------|----|----|-----------|----------|--------|--------\n"
+        "order-db            |34% |65% |289ms      |0.0%      |145ms/r |degraded\n"
+        "order-service       |55% |58% |890ms      |0.5%      |N/A     |critical\n"
+        "inventory-service   |28% |48% |34000ms    |0.0%      |N/A     |degraded\n"
+        "api-gateway         |30% |51% |890ms      |0.5%      |N/A     |degraded\n"
+        "product-service     |19% |44% |13ms       |0.0%      |N/A     |healthy\n"
+        "user-service        |14% |42% |14ms       |0.0%      |N/A     |healthy\n\n"
+        "TREND (order-db disk I/O since 06:00):\n"
+        "  06:00  read=2ms   ██░░░░░░░░░  normal\n"
+        "  08:00  read=8ms   ████░░░░░░░  4x baseline\n"
+        "  10:00  read=25ms  ██████░░░░░  12x baseline\n"
+        "  11:00  read=67ms  █████████░░  33x baseline\n"
+        "  12:00  read=145ms ███████████  72x baseline <- RAID degraded"
+    )
+    timeline = (
+        "06:00  order-db I/O normal (2ms read)\n"
+        "07:23  [SILENT] RAID disk failure — not detected until 12:00\n"
+        "08:00  I/O: 8ms read (4x normal) — no alerts\n"
+        "10:00  I/O: 25ms read — order-service p99 rises to 120ms\n"
+        "11:00  I/O: 67ms read — order-service breaching SLA\n"
+        "11:30  inventory-service batch sync slowing\n"
+        "12:00  I/O: 145ms read — RAID degradation finally visible | order-service timing out"
+    )
+    return Scenario(
+        task_id="performance_degradation", variant_id=2,
+        scenario_name="Silent RAID Degradation Causing Disk I/O Slowdown",
+        severity="P2_high",
+        root_cause_service="order-db",
+        root_cause_category="resource_exhaustion",
+        root_cause_keywords=["disk", "I/O", "RAID", "degraded", "silent", "read", "write", "slow"],
+        remediation="increase_resources",
+        acceptable_remediations=["failover", "restart_service"],
+        affected_services=["order-db", "order-service", "inventory-service", "api-gateway"],
+        incident_summary=(
+            "ALERT [P2] order-service: p99=890ms (SLA: 200ms)\n"
+            "ALERT [P3] inventory-service: batch sync 34s (normal: 5s)\n"
+            "Duration: 6h+ (gradually worsening since 06:00)\n"
+            "Note: Zero query errors — all results correct, just slow.\nOn-call: You"
+        ),
+        service_topology=ECOMMERCE_TOPOLOGY,
+        log_entries=logs, metrics_snapshot=metrics, timeline=timeline,
+        hints=[
+            "No errors anywhere. What physical resource could degrade silently?",
+            "order-db disk I/O has been climbing since 06:00. Check the trend.",
+            "RAID-10 lost a disk at 07:23 (silent). Running degraded = slow I/O. Replace disk.",
+        ],
+    )
+
+
+def _build_task3_v3():
+    """Connection leak after pool library upgrade — slow exhaustion over hours."""
+    logs = "\n".join([
+        f"[{_ts(2,0,0)}] user-service     INFO   Deployment v4.2.0 | changelog='upgraded connection pool lib to v3.0'",
+        f"[{_ts(2,0,5)}] user-service     INFO   Healthy | pool active=5/100 idle=95 | p99=14ms",
+        f"[{_ts(4,0,0)}] user-service     INFO   OK | pool active=18/100 idle=82 | p99=14ms",
+        f"[{_ts(6,0,0)}] user-service     INFO   OK | pool active=34/100 idle=66 | p99=15ms",
+        f"[{_ts(8,0,0)}] user-service     WARN   Pool usage high: active=56/100 idle=44 | p99=18ms | no errors",
+        f"[{_ts(10,0,0)}] user-service     WARN   Pool usage: active=78/100 idle=22 | p99=45ms",
+        f"[{_ts(10,0,5)}] cache-service    WARN   Eviction rate up 3x <- unrelated: normal TTL churn",
+        f"[{_ts(11,0,0)}] user-service     WARN   Pool critical: active=91/100 idle=9 | p99=234ms",
+        f"[{_ts(11,0,3)}] api-gateway      WARN   user-service p99=234ms > 200ms SLA",
+        f"[{_ts(12,0,0)}] user-service     ERROR  Pool near exhaustion: active=98/100 idle=2 | p99=890ms",
+        f"[{_ts(12,0,5)}] user-service     ERROR  Connection acquire timeout: waited 5000ms | trace=tr-9f21",
+        f"[{_ts(12,0,8)}] user-db          INFO   connections=98 active_queries=3 | 95 connections IDLE on server side",
+        f"[{_ts(12,0,10)}] user-service     WARN   Pool lib v3.0 close() returns connection to active instead of idle",
+        f"[{_ts(12,0,10)}] product-service  INFO   Health check OK | p99=12ms",
+        f"[{_ts(12,0,10)}] order-service    INFO   Health check OK | p99=42ms",
+    ])
+    metrics = (
+        "Service             |CPU |Mem |Latency_p99|Error_Rate|Pool     |Status\n"
+        "--------------------|----|----|-----------|----------|---------|--------\n"
+        "user-service        |15% |62% |890ms      |8.2%      |98/100   |critical\n"
+        "user-db             |12% |55% |3ms        |0.0%      |98 conns |healthy\n"
+        "api-gateway         |28% |51% |890ms      |8.2%      |N/A      |degraded\n"
+        "product-service     |18% |44% |12ms       |0.0%      |N/A      |healthy\n"
+        "order-service       |19% |45% |42ms       |0.0%      |N/A      |healthy\n"
+        "cache-service       |22% |68% |3ms        |0.0%      |N/A      |healthy\n\n"
+        "TREND (user-service pool active connections):\n"
+        "  02:00  active=5    ██░░░░░░░░░  5% (post-deploy)\n"
+        "  04:00  active=18   ████░░░░░░░  18%\n"
+        "  06:00  active=34   ██████░░░░░  34%\n"
+        "  08:00  active=56   ████████░░░  56%\n"
+        "  10:00  active=78   ██████████░  78%\n"
+        "  12:00  active=98   ███████████  98% <- now\n\n"
+        "KEY CLUE: user-db reports 98 connections but only 3 active queries.\n"
+        "95 connections are IDLE on the DB side but marked ACTIVE in user-service pool."
+    )
+    timeline = (
+        "02:00  user-service v4.2.0 deployed (pool lib v3.0) — 5 active connections\n"
+        "04:00  18 active (expected: ~5) — no alerts\n"
+        "06:00  34 active — growing linearly, no errors\n"
+        "08:00  56 active — p99 still fine (18ms)\n"
+        "10:00  78 active — p99 rising (45ms)\n"
+        "10:00  [RED HERRING] cache-service eviction rate up (normal TTL)\n"
+        "11:00  91 active — SLA breached (234ms)\n"
+        "12:00  98 active — connection acquire timeouts begin\n"
+        "12:00  KEY: DB shows 95/98 connections idle — LEAK in pool lib close()"
+    )
+    return Scenario(
+        task_id="performance_degradation", variant_id=3,
+        scenario_name="Connection Pool Leak After Library Upgrade",
+        severity="P2_high",
+        root_cause_service="user-service",
+        root_cause_category="code_bug",
+        root_cause_keywords=["connection", "pool", "leak", "active", "idle", "close", "v4.2.0", "library", "upgrade"],
+        remediation="rollback_deployment",
+        acceptable_remediations=["restart_service", "fix_config"],
+        affected_services=["user-service", "api-gateway"],
+        incident_summary=(
+            "ALERT [P2] user-service: p99=890ms, connection pool 98% used\n"
+            "ALERT [P3] api-gateway: user-service degraded\n"
+            "Duration: 10h+ (gradually worsening since v4.2.0 deploy at 02:00)\n"
+            "Note: user-db is healthy. Problem is in the client-side pool.\nOn-call: You"
+        ),
+        service_topology=ECOMMERCE_TOPOLOGY,
+        log_entries=logs, metrics_snapshot=metrics, timeline=timeline,
+        hints=[
+            "Pool is filling up but user-db says most connections are idle. Why the mismatch?",
+            "user-service pool lib v3.0 deployed at 02:00. Active connections growing linearly since.",
+            "Connection leak: close() in pool lib v3.0 marks connections as active instead of idle. Rollback to v4.1.x.",
+        ],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Registry
 # ═══════════════════════════════════════════════════════════════════════
 
 _TASK_VARIANTS = {
-    "single_service_failure": [_build_task1_v0, _build_task1_v1, _build_task1_v2],
-    "cascading_failure": [_build_task2_v0, _build_task2_v1],
-    "performance_degradation": [_build_task3_v0, _build_task3_v1],
+    "single_service_failure": [_build_task1_v0, _build_task1_v1, _build_task1_v2, _build_task1_v3],
+    "cascading_failure": [_build_task2_v0, _build_task2_v1, _build_task2_v2, _build_task2_v3],
+    "performance_degradation": [_build_task3_v0, _build_task3_v1, _build_task3_v2, _build_task3_v3],
 }
 
 
@@ -515,17 +835,20 @@ def get_task_description(task_id: str) -> str:
         "single_service_failure": (
             "You are an on-call SRE. A single service has failed.\n"
             "Identify: severity, root cause service, failure category,\n"
-            "what went wrong, remediation, and all affected services."
+            "what went wrong, remediation, and all affected services.\n"
+            "IMPORTANT: The root cause is the ORIGIN of the failure, not the most visible symptom."
         ),
         "cascading_failure": (
             "You are an on-call SRE. Multiple services are failing due to a cascade.\n"
-            "Only ONE is the root cause. Trace the cascade back.\n"
-            "IMPORTANT: Don't mistake a SYMPTOM for the root cause."
+            "Only ONE is the root cause. Trace the cascade back to the origin.\n"
+            "IMPORTANT: Don't mistake a SYMPTOM for the root cause.\n"
+            "Read the TIMELINE carefully — the first service to show problems is key."
         ),
         "performance_degradation": (
             "You are an on-call SRE investigating subtle performance degradation.\n"
-            "No explicit errors. Some alerts are RED HERRINGS.\n"
-            "Look at TRENDS, not just current state. Correlate timestamps."
+            "There may be NO explicit errors. Some alerts are RED HERRINGS.\n"
+            "Look at TRENDS over time, not just current state.\n"
+            "Correlate timestamps and check what changed (deployments, config)."
         ),
     }
     return descs.get(task_id, "Unknown task.")
