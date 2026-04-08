@@ -1,15 +1,16 @@
 FROM python:3.11-slim
 
+WORKDIR /app
+
+# Install system dependencies as root first
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create a non-root user for Hugging Face Spaces
 RUN useradd -m -u 1000 user
 USER user
 ENV PATH="/home/user/.local/bin:$PATH"
-
-WORKDIR /app
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
-    rm -rf /var/lib/apt/lists/*
 
 # Copy local dependencies
 COPY --chown=user requirements.txt .
