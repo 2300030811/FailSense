@@ -1,5 +1,15 @@
 """FastAPI application for Incident Response Environment."""
 
+import sys
+import os
+
+# Ensure the parent directory (incident_env/) is on the path so that
+# `models` and `server.incident_env_environment` resolve when running
+# from the incident_env/ directory (e.g. during openenv validate).
+_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent not in sys.path:
+    sys.path.insert(0, _parent)
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:
@@ -34,14 +44,16 @@ def read_root():
     }
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+def main(host: str = "0.0.0.0", port: int = None):
+    import argparse
     import uvicorn
+    if port is None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--port", type=int, default=7860)
+        args = parser.parse_args()
+        port = args.port
     uvicorn.run(app, host=host, port=port)
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+if __name__ == "__main__":
+    main()
