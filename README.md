@@ -1,3 +1,13 @@
+---
+title: Incident Env
+emoji: 🚒
+colorFrom: red
+colorTo: yellow
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # IncidentEnv — Production Incident Response for AI Agents
 
 An [OpenEnv](https://github.com/meta-pytorch/OpenEnv) reinforcement-learning environment
