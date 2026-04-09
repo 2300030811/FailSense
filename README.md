@@ -1,6 +1,5 @@
 ---
 title: Incident Env
-emoji: 🚒
 colorFrom: red
 colorTo: yellow
 sdk: docker
@@ -10,10 +9,10 @@ tags:
   - openenv
 ---
 
-# 🚒 IncidentEnv — Production Incident Response for AI Agents
+# IncidentEnv — Production Incident Response for AI Agents
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
-[![HF Space](https://img.shields.io/badge/🤗-Live%20Space-yellow)](https://huggingface.co/spaces/Mahesh811/incident-env)
+[![HF Space](https://img.shields.io/badge/Live%20Space-yellow)](https://huggingface.co/spaces/Mahesh811/incident-env)
 [![Baseline](https://img.shields.io/badge/Baseline-0.93%20avg-brightgreen)]()
 
 An [OpenEnv](https://github.com/meta-pytorch/OpenEnv)-compatible reinforcement-learning environment
@@ -22,10 +21,10 @@ e-commerce microservices architecture with **17 interconnected services**.
 
 ---
 
-## 🎯 Motivation
+## Motivation
 
 Production incident triage is one of the most valuable and challenging tasks in
-software engineering. On-call SREs must rapidly:
+software engineering. On-call Site Reliability Engineers (SREs) must rapidly:
 
 1. **Correlate** logs, metrics, and alerts from dozens of services
 2. **Trace** cascading failures back to the root cause
@@ -40,12 +39,12 @@ distributed systems.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
-```
+```text
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  AI Agent   │────→│  IncidentEnv │────→│ Scenario Engine  │
-│(inference.py)│←────│   (server)   │←────│ (12 variants)    │
+│  AI Agent   │────→│  IncidentEnv │────→│ Scenario Engine │
+│(inference.py)│←────│   (server)   │←────│ (12 variants)   │
 └─────────────┘     └──────────────┘     └─────────────────┘
                            │
                     ┌──────┴──────┐
@@ -59,19 +58,19 @@ distributed systems.
 
 ---
 
-## 📋 Tasks
+## Tasks
 
 | Task ID | Difficulty | Description | Example Scenarios |
 |---------|-----------|-------------|-------------------|
-| `single_service_failure` | 🟢 Easy | Single service outage with clear signals | DB pool exhaustion, JWT config error, disk full, certificate expiry |
-| `cascading_failure` | 🟡 Medium | Multi-service cascade requiring upstream tracing | Payment retry storm, cache OOM → DB overload, circuit breaker misconfiguration |
-| `performance_degradation` | 🔴 Hard | Subtle perf issue masked by red herrings | Memory leak over hours, N+1 query regression, connection pool leak, RAID degradation |
+| `single_service_failure` | Easy | Single service outage with clear signals | DB pool exhaustion, JWT config error, disk full, certificate expiry |
+| `cascading_failure` | Medium | Multi-service cascade requiring upstream tracing | Payment retry storm, cache OOM → DB overload, circuit breaker misconfiguration |
+| `performance_degradation` | Hard | Subtle performance issue masked by red herrings | Memory leak over hours, N+1 query regression, connection pool leak, RAID degradation |
 
 Each task type draws from **12 unique scenario variants**, ensuring diverse evaluation across runs with different root causes, affected services, and failure patterns.
 
 ---
 
-## 🎮 Action Space
+## Action Space
 
 The agent submits a structured diagnosis via `IncidentAction`:
 
@@ -92,7 +91,7 @@ class IncidentAction(Action):
 
 ---
 
-## 👁️ Observation Space
+## Observation Space
 
 The agent receives everything an on-call SRE would see when paged:
 
@@ -104,24 +103,24 @@ class IncidentObservation(Observation):
     log_entries: str           # Structured logs with timestamps, levels, messages
     metrics_snapshot: str      # CPU, memory, latency, error rate per service
     timeline: str              # Chronological event sequence
-    feedback: str              # (step 2+) Structured ✓/✗/~ per-dimension feedback
+    feedback: str              # (step 2+) Structured pass/fail/partial per-dimension feedback
     hint: str                  # (step 3+) Progressive hints to guide convergence
 ```
 
 **Feedback format** (step 2+):
-```
+```text
 Diagnosis feedback:
-  ✓ severity: correct (P1_critical)
-  ✗ root_cause_service: wrong — expected 'order-db', got 'order-service'
-  ~ root_cause_category: partial — acceptable but not exact
-  ✗ remediation: wrong — expected 'increase_resources'
+  Pass: severity: correct (P1_critical)
+  Fail: root_cause_service: wrong — expected 'order-db', got 'order-service'
+  Partial: root_cause_category: partial — acceptable but not exact
+  Fail: remediation: wrong — expected 'increase_resources'
 ```
 
 This structured feedback gives the agent actionable signal for self-correction.
 
 ---
 
-## 📊 Reward Function (1.0 max)
+## Reward Function (1.0 max)
 
 | Dimension | Weight | Method |
 |-----------|--------|--------|
@@ -132,18 +131,18 @@ This structured feedback gives the agent actionable signal for self-correction.
 | Remediation | 0.15 | Exact (0.15) or acceptable alternative (0.10) |
 | Affected services | 0.20 | IoU (intersection ÷ union) of service sets |
 
-**Step penalty:** −0.08 per step beyond the first.  
-**Episode termination:** Score ≥ 0.90 **or** step 5 reached.
+**Step penalty:** -0.08 per step beyond the first.  
+**Episode termination:** Score >= 0.90 **or** step 5 reached.
 
 ### Reward Properties
-- ✅ **Partial credit**: Every field contributes independently — agents get signal even with partial answers
-- ✅ **Varying signal**: Scores range from 0.0 to 1.0 with meaningful gradations, not sparse binary
-- ✅ **Penalizes bad behavior**: Step penalty discourages unnecessary iterations
-- ✅ **Service name aliasing**: `notif-svc` matches `notification-service` (robust to naming variants)
+- **Partial credit**: Every field contributes independently — agents get signal even with partial answers.
+- **Varying signal**: Scores range from 0.0 to 1.0 with meaningful gradations, not sparse binary.
+- **Penalizes bad behavior**: Step penalty discourages unnecessary iterations.
+- **Service name aliasing**: `notif-svc` matches `notification-service` (robust to naming variants).
 
 ---
 
-## 🚀 Setup & Usage
+## Setup & Usage
 
 ### Prerequisites
 - Python 3.10+
@@ -196,7 +195,7 @@ openenv validate
 
 ---
 
-## 📈 Baseline Scores
+## Baseline Scores
 
 Tested with **Qwen/Qwen2.5-72B-Instruct** via Hugging Face Inference API:
 
@@ -216,7 +215,7 @@ Tested with **Qwen/Qwen2.5-72B-Instruct** via Hugging Face Inference API:
 
 ---
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -228,9 +227,9 @@ Tested with **Qwen/Qwen2.5-72B-Instruct** via Hugging Face Inference API:
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
-```
+```text
 FailSense/
 ├── inference.py              # Baseline inference script (root, as required)
 ├── Dockerfile                # HF Space container (port 7860)
@@ -254,6 +253,6 @@ FailSense/
 
 ---
 
-## 📜 License
+## License
 
 MIT

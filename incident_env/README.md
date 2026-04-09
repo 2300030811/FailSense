@@ -1,6 +1,5 @@
 ---
 title: IncidentEnv
-emoji: 🚨
 colorFrom: red
 colorTo: orange
 sdk: docker
